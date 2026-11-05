@@ -36,9 +36,16 @@ def run(coro):
         return asyncio.run(coro)
 
 
+def database_url() -> str:
+    url = bot.database_url()
+    if os.environ.get("VERCEL") and not url.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError("Нет DATABASE_URL: подключи Postgres в проекте Vercel → Storage")
+    return url
+
+
 @asynccontextmanager
 async def running_app():
-    bot.store = Store(bot.database_url())
+    bot.store = Store(database_url())
     try:
         async with bot.build_app(token(), polling=False) as app:
             yield app
@@ -78,7 +85,7 @@ def cron_allowed(authorization: str | None) -> bool:
 
 
 class Router(BaseHTTPRequestHandler):
-    """Одна точка входа на все адреса: так Vercel требует для Python."""
+    """Разводит запросы по адресам. Файлы в api/ — тонкие обёртки над ним."""
 
     def reply(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()

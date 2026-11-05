@@ -13,7 +13,7 @@ import pytest
 
 import web
 from db import Store
-from index import handler
+from web import Router
 
 GROUP = -1001
 
@@ -62,7 +62,7 @@ def env(monkeypatch, tmp_path):
 
 
 def call(name, method="GET", body=None, headers=None):
-    server = HTTPServer(("127.0.0.1", 0), handler)
+    server = HTTPServer(("127.0.0.1", 0), Router)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -120,3 +120,20 @@ def test_cron_secret_is_checked_when_set(env, monkeypatch):
 def test_unknown_paths_are_404(env):
     assert call("nothing")[0] == 404
     assert call("morning", "POST", {})[0] == 404
+
+
+def test_vercel_refuses_to_run_without_postgres(env, monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        web.database_url()
+
+
+def test_every_api_file_is_the_router():
+    import importlib.util
+    from pathlib import Path
+
+    for path in (Path(__file__).resolve().parent.parent / "api").glob("*.py"):
+        spec = importlib.util.spec_from_file_location(f"api_{path.stem}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert issubclass(module.handler, Router), path.name
