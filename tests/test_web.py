@@ -1,6 +1,5 @@
 """Проверка входных точек Vercel на настоящем HTTP-сервере, но с фейковым Telegram."""
 
-import importlib.util
 import json
 import re
 import threading
@@ -8,15 +7,14 @@ import urllib.error
 import urllib.request
 from datetime import date
 from http.server import HTTPServer
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import web
 from db import Store
+from index import handler
 
-API = Path(__file__).resolve().parent.parent / "api"
 GROUP = -1001
 
 
@@ -45,13 +43,6 @@ class FakeApp:
         self.updates.append(update)
 
 
-def load_handler(name):
-    spec = importlib.util.spec_from_file_location(f"api_{name}", API / f"{name}.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.handler
-
-
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     db_path = str(tmp_path / "bot.db")
@@ -71,7 +62,7 @@ def env(monkeypatch, tmp_path):
 
 
 def call(name, method="GET", body=None, headers=None):
-    server = HTTPServer(("127.0.0.1", 0), load_handler(name))
+    server = HTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -124,3 +115,8 @@ def test_cron_secret_is_checked_when_set(env, monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "s3cret")
     assert call("morning")[0] == 401
     assert call("morning", headers={"Authorization": "Bearer s3cret"})[0] == 200
+
+
+def test_unknown_paths_are_404(env):
+    assert call("nothing")[0] == 404
+    assert call("morning", "POST", {})[0] == 404

@@ -1,15 +1,22 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "regions": ["fra1"],
+  "regions": [
+    "fra1"
+  ],
   "functions": {
-    "api/*.py": {
+    "index.py": {
       "maxDuration": 30,
-      "includeFiles": "{bot,db,rules,texts,web}.py",
       "excludeFiles": "{tests/**,*.db}"
     }
   },
   "crons": [
-    { "path": "/api/morning", "schedule": "0 9 * * *" },
-    { "path": "/api/evening", "schedule": "0 20 * * *" }
+    {
+      "path": "/api/morning",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/evening",
+      "schedule": "0 20 * * *"
+    }
   ]
 }

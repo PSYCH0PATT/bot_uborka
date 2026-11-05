@@ -8,6 +8,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlsplit
 
 from telegram import Update
 
@@ -76,7 +77,9 @@ def cron_allowed(authorization: str | None) -> bool:
     return not secret or authorization == f"Bearer {secret}"
 
 
-class JsonHandler(BaseHTTPRequestHandler):
+class Router(BaseHTTPRequestHandler):
+    """Одна точка входа на все адреса: так Vercel требует для Python."""
+
     def reply(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
@@ -85,26 +88,26 @@ class JsonHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def route(self) -> str:
+        return urlsplit(self.path).path.rstrip("/")
 
-class WebhookHandler(JsonHandler):
     def do_POST(self):
+        if self.route() != "/api/webhook":
+            return self.reply(404, {"error": "not found"})
         if self.headers.get("X-Telegram-Bot-Api-Secret-Token") != webhook_secret():
             return self.reply(401, {"error": "bad secret"})
         data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         run(handle_update(data))
         self.reply(200, {"ok": True})
 
-
-class CronHandler(JsonHandler):
-    kind = ""
-
     def do_GET(self):
-        if not cron_allowed(self.headers.get("Authorization")):
-            return self.reply(401, {"error": "bad cron secret"})
-        self.reply(200, {"kind": self.kind, "sent": run(run_cron(self.kind))})
-
-
-class SetupHandler(JsonHandler):
-    def do_GET(self):
-        host = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or self.headers.get("Host")
-        self.reply(200, run(setup(f"https://{host}")))
+        route = self.route()
+        if route in ("/api/morning", "/api/evening"):
+            if not cron_allowed(self.headers.get("Authorization")):
+                return self.reply(401, {"error": "bad cron secret"})
+            kind = route.rsplit("/", 1)[1]
+            return self.reply(200, {"kind": kind, "sent": run(run_cron(kind))})
+        if route == "/api/setup":
+            host = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or self.headers.get("Host")
+            return self.reply(200, run(setup(f"https://{host}")))
+        self.reply(404, {"error": "not found"})
