@@ -30,3 +30,9 @@ def test_grace_text_says_how_long_it_is_free(monkeypatch):
 def test_done_text_mentions_fine_only_when_late():
     assert texts.done(TRASH, "Никита", 0) == "✅ Никита вынес мусор. Красавчик."
     assert "300 Kč" in texts.done(TRASH, "Никита", 300)
+
+
+def test_evening_reminder_says_the_day_lasts_until_6am(monkeypatch):
+    for pick in range(len(texts.TODAY_EVENING)):
+        monkeypatch.setattr(texts.random, "choice", lambda seq: seq[pick])
+        assert "до 6 утра" in texts.reminder(TRASH, "Никита", TRASH.first_due, TRASH.first_due, evening=True)

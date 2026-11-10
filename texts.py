@@ -3,7 +3,7 @@
 import random
 from datetime import date
 
-from rules import CURRENCY, FINE_PER_DAY, Chore, days, fine, fined_dates
+from rules import CURRENCY, DAY_STARTS_AT, FINE_PER_DAY, Chore, days, fine, fined_dates
 
 TODAY_MORNING = [
     "{emoji} {who}, сегодня твоя очередь {task}. Сделаешь — жми кнопку, иначе не считается.",
@@ -11,8 +11,8 @@ TODAY_MORNING = [
 ]
 
 TODAY_EVENING = [
-    "{emoji} {who}, день кончается, а кнопка так и не нажата. Сегодня тебе {task}, время ещё есть.",
-    "{emoji} {who}, напоминаю: сегодня тебе {task}. Сделал — жми кнопку.",
+    "{emoji} {who}, вечер, а кнопка так и не нажата. Сегодня тебе {task}, время есть до {day_end}.",
+    "{emoji} {who}, напоминаю: сегодня тебе {task}. Успеешь до {day_end} — не опоздание. Сделал — жми кнопку.",
 ]
 
 GRACE = [
@@ -62,6 +62,7 @@ def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = Fal
         fine=fine(chore, due, today),
         next_fine=fine(chore, due, today) + FINE_PER_DAY,
         per_day=FINE_PER_DAY,
+        day_end=f"{DAY_STARTS_AT} утра",
     )
     if late <= 0:
         templates = TODAY_EVENING if evening else TODAY_MORNING

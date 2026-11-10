@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import rules
 from rules import RUGS, TRASH
@@ -100,3 +101,11 @@ def test_due_label_in_grace_period():
 
 def test_due_label_when_fined():
     assert rules.due_label(TRASH, d(5), d(8)) == "просрочено на 3 дня, штраф 200 Kč"
+
+
+def test_flat_day_lasts_until_6am():
+    tz = ZoneInfo("Europe/Prague")
+    assert rules.flat_date(datetime(2026, 11, 6, 5, 59, tzinfo=tz)) == d(5)
+    assert rules.flat_date(datetime(2026, 11, 6, 6, 0, tzinfo=tz)) == d(6)
+    assert rules.flat_date(datetime(2026, 11, 6, 0, 30, tzinfo=tz)) == d(5)
+    assert rules.flat_date(datetime(2026, 11, 6, 23, 59, tzinfo=tz)) == d(6)

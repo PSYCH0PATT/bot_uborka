@@ -7,13 +7,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from telegram import Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatType, ParseMode
-from telegram.error import BadRequest
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, Defaults
+from telegram.constants import ChatMemberStatus, ChatType, ParseMode
+from telegram.error import BadRequest, ChatMigrated, Forbidden, TelegramError
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, Defaults, TypeHandler
 
 import texts
 from db import Store, Task
-from rules import CHORES, CURRENCY, GROCERIES, NAMES, PEOPLE, due_label
+from rules import CHORES, CURRENCY, GROCERIES, NAMES, PEOPLE, due_label, flat_date
 
 
 def load_env(path: Path) -> None:
@@ -32,6 +32,7 @@ TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Prague"))
 MORNING = time.fromisoformat(os.environ.get("MORNING", "10:00")).replace(tzinfo=TZ)
 EVENING = time.fromisoformat(os.environ.get("EVENING", "21:00")).replace(tzinfo=TZ)
 DONE_BUTTON_DAYS_AHEAD = 7  # в /status кнопка «сделал» есть у задач на ближайшую неделю
+GROUPS = (ChatType.GROUP, ChatType.SUPERGROUP)
 
 HELP = (
     "/status — чья очередь и кто сколько должен\n"
@@ -60,7 +61,8 @@ def now() -> datetime:
 
 
 def today() -> date:
-    return now().date()
+    """Сегодняшнее число по правилам квартиры: до 6 утра ещё вчера."""
+    return flat_date(now())
 
 
 def name(person: str) -> str:
@@ -95,6 +97,83 @@ def refresh() -> date:
     return t
 
 
+# --- общий чат ---
+
+
+async def bot_in_chat(api: Bot, chat_id: int) -> bool:
+    """Может ли бот писать в этот чат: если кикнули, чат удалили или он стал супергруппой с новым id — нет."""
+    try:
+        me = await api.get_chat_member(chat_id, api.id)
+    except (Forbidden, BadRequest, ChatMigrated):
+        return False
+    return me.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED)
+
+
+async def send_to_group(api: Bot, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+    """Пишет в общий чат. Если Telegram превратил группу в супергруппу, запоминает её новый id."""
+    chat_id = store.get_chat_id()
+    try:
+        await api.send_message(chat_id, text, reply_markup=markup)
+    except ChatMigrated as e:
+        store.set_chat_id(e.new_chat_id)
+        await api.send_message(e.new_chat_id, text, reply_markup=markup)
+
+
+async def watch_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Перед каждым апдейтом следит, чтобы общий чат был живой.
+
+    Группа стала супергруппой — переезжаем на новый id. Старый общий чат пропал (бота кикнули, чат удалили),
+    а кто-то из нас пишет боту в группе — общим становится эта группа. Живой общий чат молча не отбираем:
+    для этого /start и кнопка.
+    """
+    chat, msg, user = update.effective_chat, update.effective_message, update.effective_user
+    if chat is None or chat.type not in GROUPS:
+        return
+    home = store.get_chat_id()
+    if home is not None and msg is not None:
+        if chat.id == home and msg.migrate_to_chat_id:
+            store.set_chat_id(msg.migrate_to_chat_id)
+            return
+        if msg.migrate_from_chat_id == home:
+            store.set_chat_id(chat.id)
+            return
+    if home == chat.id or user is None or store.person_by_tg(user.id) is None:
+        return
+    if home is not None and await bot_in_chat(ctx.bot, home):
+        return
+    store.set_chat_id(chat.id)
+    log.warning("Общий чат %s недоступен, теперь общий — %s", home, chat.id)
+    if home is None:
+        text = "📌 Теперь напоминания пишу сюда."
+    else:
+        text = "📌 В старый общий чат я больше писать не могу, так что теперь напоминания пишу сюда."
+    await ctx.bot.send_message(chat.id, text)
+
+
+def move_button() -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton("📌 Пусть напоминания идут сюда", callback_data="move")]
+
+
+async def on_move(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    person = await whoami(q)
+    if person is None:
+        return
+    old, new = store.get_chat_id(), q.message.chat_id
+    await q.edit_message_reply_markup(without_button(q.message.reply_markup, q.data))
+    if old == new:
+        await q.answer("Я и так пишу сюда.")
+        return
+    store.set_chat_id(new)
+    await q.answer("Готово.")
+    await ctx.bot.send_message(new, f"📌 {name(person)} перенёс напоминания в этот чат.")
+    if old is not None:
+        try:
+            await ctx.bot.send_message(old, f"📌 {name(person)} перенёс напоминания в другой чат, сюда больше не пишу.")
+        except TelegramError:
+            pass  # старый чат мог и пропасть
+
+
 # --- кто есть кто ---
 
 
@@ -114,14 +193,20 @@ def register_keyboard() -> InlineKeyboardMarkup | None:
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
-    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+    markup = register_keyboard()
+    if chat.type not in GROUPS:
+        intro = "Добавь меня в общий чат с соседями и напиши там /start: напоминания идут туда."
+    elif store.get_chat_id() in (None, chat.id):
         store.set_chat_id(chat.id)
         intro = "Всё, теперь я тут главный по уборке. Напоминания и наезды буду писать сюда."
     else:
-        intro = "Добавь меня в общий чат с соседями и напиши там /start: напоминания идут туда."
-    await update.effective_message.reply_text(
-        f"{intro}\n\n{register_text()}\n\n{HELP}", reply_markup=register_keyboard()
-    )
+        # Чужой /start (например, для другого бота в той же группе) не должен уводить напоминания из общего чата
+        intro = (
+            "Напоминания сейчас идут в другой чат. Если общий чат — этот, "
+            "нажмите кнопку ниже (сработает только у Димы, Артёма или Никиты)."
+        )
+        markup = InlineKeyboardMarkup([move_button(), *(markup.inline_keyboard if markup else ())])
+    await update.effective_message.reply_text(f"{intro}\n\n{register_text()}\n\n{HELP}", reply_markup=markup)
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -207,7 +292,10 @@ async def on_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     group = store.get_chat_id()
     await ctx.bot.send_message(q.message.chat_id, text)
     if group and group != q.message.chat_id:
-        await ctx.bot.send_message(group, text)
+        try:
+            await send_to_group(ctx.bot, text)
+        except TelegramError as e:  # сюда уже написали, а общий чат починится сам, как только в нём кто-то нажмёт
+            log.warning("Не смог продублировать в общий чат %s: %s", group, e)
 
 
 async def send_reminders(api: Bot, evening: bool) -> int:
@@ -219,7 +307,11 @@ async def send_reminders(api: Bot, evening: bool) -> int:
     due = [task for task in store.open_tasks() if task.due <= t]
     for task in due:
         text = texts.reminder(CHORES[task.chore], who(task.assignee), task.due, t, evening)
-        await api.send_message(chat_id, text, reply_markup=done_keyboard([task], with_names=False))
+        try:
+            await send_to_group(api, text, done_keyboard([task], with_names=False))
+        except TelegramError as e:
+            log.error("Не могу писать в общий чат %s: %s. Напишите /status в нужной группе — бот переедет туда", chat_id, e)
+            raise
     return len(due)
 
 
@@ -237,6 +329,8 @@ async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if await send_reminders(ctx.bot, evening=False) == 0:
         await update.effective_message.reply_text("Сегодня никто ничего не должен. Подозрительно.")
+    elif update.effective_chat.id != store.get_chat_id():
+        await update.effective_message.reply_text("Напоминания ушли в общий чат.")
 
 
 # --- штрафы ---
@@ -378,6 +472,7 @@ def build_app(token: str, polling: bool = True) -> Application:
     else:
         builder = builder.updater(None).job_queue(None)
     app = builder.build()
+    app.add_handler(TypeHandler(Update, watch_chat), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
@@ -386,6 +481,7 @@ def build_app(token: str, polling: bool = True) -> Application:
     app.add_handler(CommandHandler("paid", cmd_paid))
     app.add_handler(CommandHandler("remind", cmd_remind))
     app.add_handler(CallbackQueryHandler(on_register, pattern=r"^reg:"))
+    app.add_handler(CallbackQueryHandler(on_move, pattern=r"^move$"))
     app.add_handler(CallbackQueryHandler(on_done, pattern=r"^done:"))
     app.add_handler(CallbackQueryHandler(on_pay, pattern=r"^pay:"))
     app.add_handler(CallbackQueryHandler(on_buy, pattern=r"^buy:"))

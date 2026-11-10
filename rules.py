@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 
 FINE_PER_DAY = 100
 CURRENCY = "Kč"
+DAY_STARTS_AT = 6  # час: до 6 утра ещё идёт вчерашний день
 
 PEOPLE = ("dima", "artem", "nikita")
 NAMES = {"dima": "Дима", "artem": "Артём", "nikita": "Никита"}
@@ -63,6 +64,11 @@ RUGS = Chore(
 )
 
 CHORES = {c.key: c for c in (TRASH, RUGS)}
+
+
+def flat_date(moment: datetime) -> date:
+    """Какое сегодня число по правилам квартиры: ночь до DAY_STARTS_AT ещё считается вчерашним днём."""
+    return (moment - timedelta(hours=DAY_STARTS_AT)).date()
 
 
 def next_in_order(order: tuple[str, ...], current: str) -> str:
