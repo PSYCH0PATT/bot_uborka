@@ -8,6 +8,7 @@ import pytest
 from telegram.error import ChatMigrated, Forbidden
 
 import bot
+import phrases
 
 GROUP = -1001
 OTHER = -1002  # другая конфа, где тоже оказался бот
@@ -134,7 +135,8 @@ def test_reminder_pings_assignee_and_only_they_can_mark_done(ctx):
 
     q = FakeQuery(button.callback_data, "artem", reminder.markup)
     press(bot.on_done, q, ctx)
-    assert "Не твоя очередь" in q.answers[0]
+    assert "Никита" in q.answers[0]  # чья очередь на самом деле
+    assert bot.store.open_tasks()[0].done_on is None
 
     q = FakeQuery(button.callback_data, "nikita", reminder.markup)
     press(bot.on_done, q, ctx)
@@ -156,7 +158,8 @@ def test_late_trash_is_fined_and_paid_with_neighbour_confirmation(ctx, monkeypat
 
     q = FakeQuery(ok_button, "nikita")
     press(bot.on_pay, q, ctx)
-    assert "хитрожопый" in q.answers[0]
+    assert q.answers[0] in phrases.SELF_CONFIRM
+    assert bot.store.balance("nikita") == 200
 
     q = FakeQuery(ok_button, "dima")
     press(bot.on_pay, q, ctx)
@@ -203,7 +206,8 @@ def test_trash_taken_out_at_3am_counts_for_the_previous_day(ctx, monkeypatch):
     asyncio.run(bot.send_reminders(ctx.bot, evening=False))
     button = ctx.bot.sent[0].markup.inline_keyboard[0][0].callback_data
     press(bot.on_done, FakeQuery(button, "nikita"), ctx)
-    assert "Красавчик" in ctx.bot.sent[-1].text
+    assert "Никита</b> вынес мусор." in ctx.bot.sent[-1].text
+    assert "опоздание" not in ctx.bot.sent[-1].text
     assert bot.store.balance("nikita") == 0
     assert "до 10.11" in ctx.bot.sent[-1].text  # следующий срок считается от 6.11
 
@@ -304,3 +308,38 @@ def test_remind_from_another_chat_says_where_it_went(ctx):
     replies = command(bot.cmd_remind, "dima", ctx, chat_id=OTHER)
     assert replies[0].text == "Напоминания ушли в общий чат."
     assert ctx.bot.sent[0].chat_id == GROUP
+
+
+# --- подъёбы просто так ---
+
+
+def test_banter_is_random_and_not_too_often(ctx, monkeypatch):
+    monkeypatch.setattr(bot, "BANTER_CHANCE", 1)
+    set_day(monkeypatch, 1)
+    assert asyncio.run(bot.cron(ctx.bot, evening=False)) == (0, True)
+    assert asyncio.run(bot.cron(ctx.bot, evening=True)) == (0, False)
+    set_day(monkeypatch, 2)
+    assert asyncio.run(bot.cron(ctx.bot, evening=False)) == (0, False)
+    set_day(monkeypatch, 3)
+    assert asyncio.run(bot.cron(ctx.bot, evening=False)) == (0, True)
+    assert len(ctx.bot.sent) == 2
+    assert all(m.chat_id == GROUP for m in ctx.bot.sent)
+    names = [bot.name(p) for p in bot.PEOPLE]
+    assert all(m.text in {line.format(who=n) for line in phrases.BANTER for n in names} for m in ctx.bot.sent)
+
+
+def test_no_banter_when_dice_say_no_or_reminders_went_out(ctx, monkeypatch):
+    monkeypatch.setattr(bot, "BANTER_CHANCE", 0)
+    set_day(monkeypatch, 1)
+    assert asyncio.run(bot.cron(ctx.bot, evening=False)) == (0, False)
+    monkeypatch.setattr(bot, "BANTER_CHANCE", 1)
+    set_day(monkeypatch, 5)  # Никите выносить мусор: хватит и напоминания
+    assert asyncio.run(bot.cron(ctx.bot, evening=False)) == (1, False)
+
+
+def test_short_replies_come_from_phrases(ctx, monkeypatch):
+    replies = command(bot.cmd_paid, "dima", ctx)
+    assert replies[0].text in {line.format(who=bot.name("dima")) for line in phrases.NO_DEBT}
+    set_day(monkeypatch, 3)  # до 5.11 никто ничего не должен
+    replies = command(bot.cmd_remind, "dima", ctx)
+    assert replies[0].text in phrases.NOTHING_DUE

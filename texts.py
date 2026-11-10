@@ -1,44 +1,20 @@
-"""Тексты напоминаний и наездов. Чем дольше просрочка, тем злее."""
+"""Что бот пишет. Сами подъёбы лежат в phrases.py, тут — какой взять и какие факты дописать рядом."""
 
 import random
 from datetime import date
 
+import phrases
 from rules import CURRENCY, DAY_STARTS_AT, FINE_PER_DAY, Chore, days, fine, fined_dates
 
-TODAY_MORNING = [
-    "{emoji} {who}, сегодня твоя очередь {task}. Сделаешь — жми кнопку, иначе не считается.",
-    "{emoji} {who}, доброе утро. Сегодня тебе {task}. Кнопку не забудь, бот на слово не верит.",
-]
+DAY_END = f"{DAY_STARTS_AT} утра"
 
-TODAY_EVENING = [
-    "{emoji} {who}, вечер, а кнопка так и не нажата. Сегодня тебе {task}, время есть до {day_end}.",
-    "{emoji} {who}, напоминаю: сегодня тебе {task}. Успеешь до {day_end} — не опоздание. Сделал — жми кнопку.",
-]
+# Чем дольше штраф, тем злее: 1 день, 2–3 дня, 4 и больше
+FINED = (phrases.FINED_1, phrases.FINED_2, phrases.FINED_3)
+FINED_EMOJI = ("💸", "🤬", "🚨")
 
-GRACE = [
-    "⏳ {who}, срок был {due}, ты уже опаздываешь. Пока без штрафа, но {free}. Потом {per_day} {cur} в день.",
-    "⏳ {who}, {task} надо было ещё {due}. Халява заканчивается: {free}.",
-]
 
-FINED = [
-    # 1 день штрафа
-    [
-        "💸 {who}, поздравляю, ты попал на бабки. Надо было {task} ещё {due}, штраф уже {fine} {cur}. Завтра будет {next_fine} {cur}.",
-        "💸 {who}, ты охуел? Просрочка {late}, минус {fine} {cur}, и счётчик крутится.",
-    ],
-    # 2–3 дня
-    [
-        "🤬 {who}, это уже неприлично. {late} просрочки, долг {fine} {cur}. Мы всё видим.",
-        "🤬 {who}, {fine} {cur} штрафа — это пиво, которое ты мог выпить. Иди уже {do}.",
-        "🤬 {who}, сколько можно? Уже {fine} {cur}, завтра будет {next_fine}. Просто встань и {do}.",
-    ],
-    # 4+ дней
-    [
-        "🚨 {who}, ты позор этой квартиры. {late} просрочки, {fine} {cur}. Соседи уже ищут новую хату.",
-        "🚨 {who}, у меня кончились слова. {fine} {cur}. Просто {do}, блять.",
-        "🚨 {who}, рекорд квартиры: {late} просрочки и {fine} {cur} долга. Гордиться нечем.",
-    ],
-]
+def pick(options: tuple[str, ...], **fields) -> str:
+    return random.choice(options).format(**fields)
 
 
 def _level(fined_days: int) -> int:
@@ -52,7 +28,6 @@ def _level(fined_days: int) -> int:
 def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = False) -> str:
     late = (today - due).days
     fields = dict(
-        emoji=chore.emoji,
         who=who,
         task=chore.task,
         do=chore.do,
@@ -61,23 +36,64 @@ def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = Fal
         cur=CURRENCY,
         fine=fine(chore, due, today),
         next_fine=fine(chore, due, today) + FINE_PER_DAY,
-        per_day=FINE_PER_DAY,
-        day_end=f"{DAY_STARTS_AT} утра",
+        day_end=DAY_END,
     )
+    if late <= 0 and not evening:
+        return f"{chore.emoji} {pick(phrases.TODAY_MORNING, **fields)}"
     if late <= 0:
-        templates = TODAY_EVENING if evening else TODAY_MORNING
-    elif late <= chore.grace_days:
+        template = random.choice(phrases.TODAY_EVENING)
+        text = f"{chore.emoji} {template.format(**fields)}"
+        if "{day_end}" not in template:
+            text += f"\n⏰ Успеешь до {DAY_END} — не опоздание."
+        return text
+    if late <= chore.grace_days:
         free_left = chore.grace_days - late
-        fields["free"] = {0: "сегодня последний бесплатный день", 1: "завтра последний бесплатный день"}.get(
-            free_left, f"бесплатных дней осталось: {free_left}"
+        free = {0: "Сегодня последний день без штрафа", 1: "Завтра последний день без штрафа"}.get(
+            free_left, f"Без штрафа ещё {days(free_left)}"
         )
-        templates = GRACE
-    else:
-        templates = FINED[_level(len(fined_dates(chore, due, today)))]
-    return random.choice(templates).format(**fields)
+        return (
+            f"⏳ {pick(phrases.GRACE, **fields)}\n"
+            f"Срок был {fields['due']}. {free}, потом {FINE_PER_DAY} {CURRENCY} в день."
+        )
+    level = _level(len(fined_dates(chore, due, today)))
+    return (
+        f"{FINED_EMOJI[level]} {pick(FINED[level], **fields)}\n"
+        f"Просрочка {fields['late']}, штраф уже {fields['fine']} {CURRENCY}, завтра будет {fields['next_fine']} {CURRENCY}."
+    )
 
 
 def done(chore: Chore, who: str, fine_total: int) -> str:
     if fine_total:
-        return f"✅ {who} наконец-то {chore.done}. Опоздание обошлось в {fine_total} {CURRENCY}."
-    return f"✅ {who} {chore.done}. Красавчик."
+        head = f"✅ {who} наконец-то {chore.done}, опоздание обошлось в {fine_total} {CURRENCY}."
+        return f"{head} {pick(phrases.DONE_LATE, who=who, fine=fine_total, cur=CURRENCY)}"
+    return f"✅ {who} {chore.done}. {pick(phrases.DONE_OK, who=who)}"
+
+
+def not_your_turn(owner: str) -> str:
+    """Всплывашка: жмёт «сделал» на чужой задаче. Обычный текст, без HTML."""
+    return pick(phrases.NOT_YOUR_TURN, owner=owner)
+
+
+def self_confirm() -> str:
+    return pick(phrases.SELF_CONFIRM)
+
+
+def no_debt(who: str) -> str:
+    return pick(phrases.NO_DEBT, who=who)
+
+
+def nothing_due() -> str:
+    return pick(phrases.NOTHING_DUE)
+
+
+def pay_confirmed(payer: str, judge: str, amount: int, left: int) -> str:
+    head = f"✅ {payer} закрыл {amount} {CURRENCY}, подтвердил {judge}. Осталось долга: {left} {CURRENCY}."
+    return f"{head} {pick(phrases.PAY_CONFIRMED, payer=payer, judge=judge)}"
+
+
+def pay_rejected(payer: str, judge: str, left: int) -> str:
+    return f"❌ {pick(phrases.PAY_REJECTED, payer=payer, judge=judge)} Долг {left} {CURRENCY} на месте."
+
+
+def banter(who: str) -> str:
+    return pick(phrases.BANTER, who=who)

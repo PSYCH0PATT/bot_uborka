@@ -99,8 +99,8 @@ def test_webhook_passes_update_to_the_bot(env):
 
 
 def test_morning_cron_reminds_once_per_day(env):
-    assert call("morning") == (200, {"kind": "morning", "sent": 1})
-    assert call("morning") == (200, {"kind": "morning", "sent": 0})
+    assert call("morning") == (200, {"kind": "morning", "sent": 1, "banter": False})
+    assert call("morning") == (200, {"kind": "morning", "sent": 0, "banter": False})
     assert len(env.bot.sent) == 1
     assert env.bot.sent[0].chat_id == GROUP
     assert "tg://user?id=33" in env.bot.sent[0].text
@@ -108,7 +108,7 @@ def test_morning_cron_reminds_once_per_day(env):
 
 def test_evening_cron_is_counted_separately(env):
     call("morning")
-    assert call("evening") == (200, {"kind": "evening", "sent": 1})
+    assert call("evening") == (200, {"kind": "evening", "sent": 1, "banter": False})
 
 
 def test_cron_secret_is_checked_when_set(env, monkeypatch):
@@ -137,3 +137,11 @@ def test_every_api_file_is_the_router():
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         assert issubclass(module.handler, Router), path.name
+
+
+def test_quiet_cron_sometimes_roasts_someone(env, monkeypatch):
+    monkeypatch.setattr(web.bot, "today", lambda: date(2026, 11, 3))  # до первого мусора напоминать некого
+    monkeypatch.setattr(web.bot, "BANTER_CHANCE", 1)
+    assert call("morning") == (200, {"kind": "morning", "sent": 0, "banter": True})
+    assert call("evening") == (200, {"kind": "evening", "sent": 0, "banter": False})  # не чаще раза в два дня
+    assert [m.chat_id for m in env.bot.sent] == [GROUP]

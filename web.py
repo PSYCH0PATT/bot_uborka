@@ -58,12 +58,13 @@ async def handle_update(data: dict) -> None:
         await app.process_update(Update.de_json(data, app.bot))
 
 
-async def run_cron(kind: str) -> int:
+async def run_cron(kind: str) -> dict:
     """Рассылает напоминания. Второй вызов за тот же день ничего не шлёт — крон бывает доставлен дважды."""
     async with running_app() as app:
         if not bot.store.mark_once(f"cron:{kind}:{bot.today().isoformat()}"):
-            return 0
-        return await bot.send_reminders(app.bot, evening=kind == "evening")
+            return {"kind": kind, "sent": 0, "banter": False}
+        sent, banter = await bot.cron(app.bot, evening=kind == "evening")
+        return {"kind": kind, "sent": sent, "banter": banter}
 
 
 async def setup(base_url: str) -> dict:
@@ -112,8 +113,7 @@ class Router(BaseHTTPRequestHandler):
         if route in ("/api/morning", "/api/evening"):
             if not cron_allowed(self.headers.get("Authorization")):
                 return self.reply(401, {"error": "bad cron secret"})
-            kind = route.rsplit("/", 1)[1]
-            return self.reply(200, {"kind": kind, "sent": run(run_cron(kind))})
+            return self.reply(200, run(run_cron(route.rsplit("/", 1)[1])))
         if route == "/api/setup":
             host = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or self.headers.get("Host")
             return self.reply(200, run(setup(f"https://{host}")))

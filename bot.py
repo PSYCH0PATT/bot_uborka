@@ -2,6 +2,7 @@
 
 import logging
 import os
+import random
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -33,6 +34,8 @@ MORNING = time.fromisoformat(os.environ.get("MORNING", "10:00")).replace(tzinfo=
 EVENING = time.fromisoformat(os.environ.get("EVENING", "21:00")).replace(tzinfo=TZ)
 DONE_BUTTON_DAYS_AHEAD = 7  # в /status кнопка «сделал» есть у задач на ближайшую неделю
 GROUPS = (ChatType.GROUP, ChatType.SUPERGROUP)
+BANTER_CHANCE = 0.2  # шанс подъебать кого-нибудь просто так при утреннем или вечернем кроне…
+BANTER_MIN_GAP_DAYS = 2  # …но не чаще раза в два дня: в среднем выходит пара раз в неделю
 
 HELP = (
     "/status — чья очередь и кто сколько должен\n"
@@ -276,7 +279,7 @@ async def on_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.edit_message_reply_markup(without_button(q.message.reply_markup, q.data))
         return
     if task.assignee != person:
-        await q.answer(f"Не твоя очередь, это задача для {NAMES[task.assignee]}.", show_alert=True)
+        await q.answer(texts.not_your_turn(NAMES[task.assignee]), show_alert=True)
         return
 
     t = today()
@@ -315,12 +318,33 @@ async def send_reminders(api: Bot, evening: bool) -> int:
     return len(due)
 
 
+async def maybe_banter(api: Bot) -> bool:
+    """Иногда, без повода, подъёбывает кого-нибудь в общем чате. True — если подъебал."""
+    if store.get_chat_id() is None:
+        return False
+    t = today()
+    last = store.get_setting("banter:last")
+    if last and (t - date.fromisoformat(last)).days < BANTER_MIN_GAP_DAYS:
+        return False
+    if random.random() >= BANTER_CHANCE:
+        return False
+    store.set_setting("banter:last", t.isoformat())
+    await send_to_group(api, texts.banter(name(random.choice(PEOPLE))))
+    return True
+
+
+async def cron(api: Bot, evening: bool) -> tuple[int, bool]:
+    """Утренний или вечерний обход: напоминания, а если напоминать некому — иногда подъёб просто так."""
+    sent = await send_reminders(api, evening)
+    return sent, sent == 0 and await maybe_banter(api)
+
+
 async def morning(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_reminders(ctx.bot, evening=False)
+    await cron(ctx.bot, evening=False)
 
 
 async def evening(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_reminders(ctx.bot, evening=True)
+    await cron(ctx.bot, evening=True)
 
 
 async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -328,7 +352,7 @@ async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Сначала добавь меня в общий чат и напиши там /start.")
         return
     if await send_reminders(ctx.bot, evening=False) == 0:
-        await update.effective_message.reply_text("Сегодня никто ничего не должен. Подозрительно.")
+        await update.effective_message.reply_text(texts.nothing_due())
     elif update.effective_chat.id != store.get_chat_id():
         await update.effective_message.reply_text("Напоминания ушли в общий чат.")
 
@@ -352,7 +376,7 @@ async def cmd_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     refresh()
     pay = store.request_payment(person, now())
     if pay is None:
-        await update.effective_message.reply_text("Ты ничего не должен. Пока что.")
+        await update.effective_message.reply_text(texts.no_debt(name(person)))
         return
     keyboard = InlineKeyboardMarkup(
         [
@@ -378,7 +402,7 @@ async def on_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     decide = store.confirm_payment if verdict == "ok" else store.reject_payment
     status = decide(pay.id, person, now()) if pay else "done"
     if status == "self":
-        await q.answer("Сам себе не подтвердишь, хитрожопый.", show_alert=True)
+        await q.answer(texts.self_confirm(), show_alert=True)
         return
     if status == "done":
         await q.answer("Уже решено.")
@@ -387,12 +411,9 @@ async def on_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await q.answer("Записал.")
     left = store.balance(pay.person)
     if verdict == "ok":
-        text = (
-            f"✅ {name(pay.person)} закрыл {pay.amount} {CURRENCY}, подтвердил {name(person)}. "
-            f"Осталось долга: {left} {CURRENCY}."
-        )
+        text = texts.pay_confirmed(name(pay.person), name(person), pay.amount, left)
     else:
-        text = f"❌ {name(person)} говорит, что {name(pay.person)} гонит. Долг {left} {CURRENCY} на месте."
+        text = texts.pay_rejected(name(pay.person), name(person), left)
     await safe_edit(q, text, None)
 
 

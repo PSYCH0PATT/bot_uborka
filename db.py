@@ -140,16 +140,23 @@ class Store:
 
     # --- настройки ---
 
+    def get_setting(self, key: str) -> str | None:
+        row = self._one("SELECT value FROM settings WHERE key = ?", key)
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._write(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            key,
+            value,
+        )
+
     def get_chat_id(self) -> int | None:
-        row = self._one("SELECT value FROM settings WHERE key = 'chat_id'")
-        return int(row["value"]) if row else None
+        value = self.get_setting("chat_id")
+        return int(value) if value else None
 
     def set_chat_id(self, chat_id: int) -> None:
-        self._write(
-            "INSERT INTO settings (key, value) VALUES ('chat_id', ?) "
-            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            str(chat_id),
-        )
+        self.set_setting("chat_id", str(chat_id))
 
     def mark_once(self, key: str) -> bool:
         """True только при первом вызове с этим ключом — чтобы крон не напомнил дважды за день."""

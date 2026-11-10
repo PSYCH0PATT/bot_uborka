@@ -6,7 +6,7 @@
   "functions": {
     "api/*.py": {
       "maxDuration": 30,
-      "includeFiles": "{bot,db,rules,texts,web}.py",
+      "includeFiles": "{bot,db,phrases,rules,texts,web}.py",
       "excludeFiles": "{tests/**,*.db}"
     }
   },
