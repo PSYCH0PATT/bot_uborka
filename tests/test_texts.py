@@ -62,6 +62,8 @@ def test_payment_texts_keep_the_numbers(monkeypatch):
         no = texts.pay_rejected("Никита", "Дима", 200)
         assert no.startswith("❌ ") and no.endswith(" Долг 200 Kč на месте.")
         assert "Никита" in no and "Дима" in no
+    # пока ждали подтверждения, натикал новый штраф — «долг закрыт» не пишем
+    assert texts.pay_confirmed("Никита", "Дима", 200, 100).endswith("пока ты платил, счётчик тикал.")
 
 
 def test_alerts_fit_telegram_limit(monkeypatch):

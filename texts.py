@@ -88,6 +88,8 @@ def nothing_due() -> str:
 
 def pay_confirmed(payer: str, judge: str, amount: int, left: int) -> str:
     head = f"✅ {payer} закрыл {amount} {CURRENCY}, подтвердил {judge}. Осталось долга: {left} {CURRENCY}."
+    if left > 0:  # пока ждали подтверждения, натикал новый штраф — фразы про «долг закрыт» тут врут
+        return f"{head} Не расслабляйся, {payer}: пока ты платил, счётчик тикал."
     return f"{head} {pick(phrases.PAY_CONFIRMED, payer=payer, judge=judge)}"
 
 
