@@ -6,18 +6,18 @@ import pytest
 
 import phrases
 
-REMIND = {"who", "task", "do", "due", "late", "fine", "next_fine", "cur"}
+REMIND = {"who", "other", "task", "do", "due", "late", "fine", "next_fine", "cur"}
 
 # имя: (обязательные — из каждой группы хотя бы одна подстановка, допустимые, предел длины)
 SPECS = {
-    "TODAY_MORNING": ([{"who"}, {"task", "do"}], {"who", "task", "do", "day_end"}, 200),
-    "TODAY_EVENING": ([{"who"}, {"task", "do"}], {"who", "task", "do", "day_end"}, 200),
-    "GRACE": ([{"who"}], {"who", "task", "do", "due", "late"}, 200),
+    "TODAY_MORNING": ([{"who"}, {"task", "do"}], {"who", "other", "task", "do", "day_end"}, 200),
+    "TODAY_EVENING": ([{"who"}, {"task", "do"}], {"who", "other", "task", "do", "day_end"}, 200),
+    "GRACE": ([{"who"}], {"who", "other", "task", "do", "due", "late"}, 200),
     "FINED_1": ([{"who"}], REMIND, 200),
     "FINED_2": ([{"who"}], REMIND, 200),
     "FINED_3": ([{"who"}], REMIND, 200),
-    "DONE_OK": ([], {"who"}, 140),
-    "DONE_LATE": ([], {"who", "fine", "cur"}, 140),
+    "DONE_OK": ([], {"who", "other"}, 140),
+    "DONE_LATE": ([], {"who", "other", "fine", "cur"}, 140),
     "PAY_CONFIRMED": ([], {"payer", "judge"}, 140),
     "PAY_REJECTED": ([{"judge"}, {"payer"}], {"judge", "payer"}, 160),
     "NOT_YOUR_TURN": ([{"owner"}], {"owner"}, 150),  # всплывашка Telegram — максимум 200 знаков

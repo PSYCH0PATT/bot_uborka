@@ -25,10 +25,12 @@ def _level(fined_days: int) -> int:
     return 2
 
 
-def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = False) -> str:
+def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = False, *, other: str) -> str:
+    """{who} — чья очередь (ссылка с уведомлением), {other} — кто-то из двух других соседей."""
     late = (today - due).days
     fields = dict(
         who=who,
+        other=other,
         task=chore.task,
         do=chore.do,
         due=f"{due:%d.%m}",
@@ -62,11 +64,11 @@ def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = Fal
     )
 
 
-def done(chore: Chore, who: str, fine_total: int) -> str:
+def done(chore: Chore, who: str, fine_total: int, *, other: str) -> str:
     if fine_total:
         head = f"✅ {who} наконец-то {chore.done}, опоздание обошлось в {fine_total} {CURRENCY}."
-        return f"{head} {pick(phrases.DONE_LATE, who=who, fine=fine_total, cur=CURRENCY)}"
-    return f"✅ {who} {chore.done}. {pick(phrases.DONE_OK, who=who)}"
+        return f"{head} {pick(phrases.DONE_LATE, who=who, other=other, fine=fine_total, cur=CURRENCY)}"
+    return f"✅ {who} {chore.done}. {pick(phrases.DONE_OK, who=who, other=other)}"
 
 
 def not_your_turn(owner: str) -> str:

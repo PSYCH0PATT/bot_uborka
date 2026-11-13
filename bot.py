@@ -72,6 +72,11 @@ def name(person: str) -> str:
     return f"<b>{NAMES[person]}</b>"
 
 
+def someone_else(person: str) -> str:
+    """Имя кого-то из двух других соседей — для фраз про двоих."""
+    return name(random.choice([p for p in PEOPLE if p != person]))
+
+
 def who(person: str) -> str:
     """Имя со ссылкой — Telegram пришлёт человеку уведомление."""
     tg_id = store.tg_of(person)
@@ -289,7 +294,7 @@ async def on_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await q.edit_message_reply_markup(without_button(q.message.reply_markup, q.data))
 
     text = (
-        f"{texts.done(chore, name(person), store.task_fine(task.id))}\n\n"
+        f"{texts.done(chore, name(person), store.task_fine(task.id), other=someone_else(person))}\n\n"
         f"Дальше: {who(nxt.assignee)}, {chore.task} {due_label(chore, nxt.due, t)}."
     )
     group = store.get_chat_id()
@@ -309,7 +314,7 @@ async def send_reminders(api: Bot, evening: bool) -> int:
     t = refresh()
     due = [task for task in store.open_tasks() if task.due <= t]
     for task in due:
-        text = texts.reminder(CHORES[task.chore], who(task.assignee), task.due, t, evening)
+        text = texts.reminder(CHORES[task.chore], who(task.assignee), task.due, t, evening, other=someone_else(task.assignee))
         try:
             await send_to_group(api, text, done_keyboard([task], with_names=False))
         except TelegramError as e:
