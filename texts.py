@@ -97,5 +97,6 @@ def pay_rejected(payer: str, judge: str, left: int) -> str:
     return f"❌ {pick(phrases.PAY_REJECTED, payer=payer, judge=judge)} Долг {left} {CURRENCY} на месте."
 
 
-def banter(who: str) -> str:
-    return pick(phrases.BANTER, who=who)
+def banter(who: str, other: str) -> str:
+    """Подъёб просто так: {who} — кого подъёбываем, {other} — второй из соседей, если фразе нужен."""
+    return pick(phrases.BANTER, who=who, other=other)

@@ -329,7 +329,8 @@ async def maybe_banter(api: Bot) -> bool:
     if random.random() >= BANTER_CHANCE:
         return False
     store.set_setting("banter:last", t.isoformat())
-    await send_to_group(api, texts.banter(name(random.choice(PEOPLE))))
+    target, other = random.sample(PEOPLE, 2)
+    await send_to_group(api, texts.banter(name(target), name(other)))
     return True
 
 

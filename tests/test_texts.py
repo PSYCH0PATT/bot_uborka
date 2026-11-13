@@ -76,6 +76,6 @@ def test_alerts_fit_telegram_limit(monkeypatch):
 def test_banter_and_short_replies_render(monkeypatch):
     seen = set()
     for _ in each_phrase(monkeypatch):
-        seen.add(texts.banter("<b>Дима</b>"))
+        seen.add(texts.banter("<b>Дима</b>", "<b>Артём</b>"))
         assert "{" not in texts.no_debt("<b>Дима</b>") + texts.nothing_due()
     assert len(seen) == len(phrases.BANTER)

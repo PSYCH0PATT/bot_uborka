@@ -24,11 +24,11 @@ SPECS = {
     "SELF_CONFIRM": ([], set(), 150),
     "NO_DEBT": ([], {"who"}, 160),
     "NOTHING_DUE": ([], set(), 160),
-    "BANTER": ([], {"who"}, 220),
+    "BANTER": ([], {"who", "other"}, 220),
 }
 SAMPLE = dict(
     who="Никита", task="постирать коврики", do="постирай коврики", day_end="6 утра", due="05.11", late="2 дня",
-    fine="200", next_fine="300", cur="Kč", owner="Артём", payer="Никита", judge="Дима",
+    fine="200", next_fine="300", cur="Kč", owner="Артём", payer="Никита", judge="Дима", other="Артём",
 )
 # Напоминания и «сделал» общие для мусора и ковриков: дело называется только через {task}/{do}
 CHORE_AGNOSTIC = {"TODAY_MORNING", "TODAY_EVENING", "GRACE", "FINED_1", "FINED_2", "FINED_3", "DONE_OK", "DONE_LATE"}

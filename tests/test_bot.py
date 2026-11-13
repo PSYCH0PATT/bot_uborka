@@ -324,8 +324,9 @@ def test_banter_is_random_and_not_too_often(ctx, monkeypatch):
     assert asyncio.run(bot.cron(ctx.bot, evening=False)) == (0, True)
     assert len(ctx.bot.sent) == 2
     assert all(m.chat_id == GROUP for m in ctx.bot.sent)
-    names = [bot.name(p) for p in bot.PEOPLE]
-    assert all(m.text in {line.format(who=n) for line in phrases.BANTER for n in names} for m in ctx.bot.sent)
+    pairs = [(bot.name(a), bot.name(b)) for a in bot.PEOPLE for b in bot.PEOPLE if a != b]
+    rendered = {line.format(who=a, other=b) for line in phrases.BANTER for a, b in pairs}
+    assert all(m.text in rendered for m in ctx.bot.sent)
 
 
 def test_no_banter_when_dice_say_no_or_reminders_went_out(ctx, monkeypatch):
