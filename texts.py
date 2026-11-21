@@ -4,7 +4,7 @@ import random
 from datetime import date
 
 import phrases
-from rules import CURRENCY, DAY_STARTS_AT, FINE_PER_DAY, Chore, days, fine, fined_dates
+from rules import CURRENCY, DAY_STARTS_AT, Chore, days, due_label, fine, fined_dates
 
 DAY_END = f"{DAY_STARTS_AT} утра"
 
@@ -37,7 +37,7 @@ def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = Fal
         late=days(late),
         cur=CURRENCY,
         fine=fine(chore, due, today),
-        next_fine=fine(chore, due, today) + FINE_PER_DAY,
+        next_fine=fine(chore, due, today) + chore.fine_per_day,
         day_end=DAY_END,
     )
     if late <= 0 and not evening:
@@ -48,6 +48,8 @@ def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = Fal
         if "{day_end}" not in template:
             text += f"\n⏰ Успеешь до {DAY_END} — не опоздание."
         return text
+    if chore.fine_per_day <= 0:  # задача из /task без денег: только позор, злость не растёт
+        return f"⏳ {pick(phrases.GRACE, **fields)}\nСрок был {fields['due']}, просрочка {fields['late']}. Штрафа нет, только позор."
     if late <= chore.grace_days:
         free_left = chore.grace_days - late
         free = {0: "Сегодня последний день без штрафа", 1: "Завтра последний день без штрафа"}.get(
@@ -55,7 +57,7 @@ def reminder(chore: Chore, who: str, due: date, today: date, evening: bool = Fal
         )
         return (
             f"⏳ {pick(phrases.GRACE, **fields)}\n"
-            f"Срок был {fields['due']}. {free}, потом {FINE_PER_DAY} {CURRENCY} в день."
+            f"Срок был {fields['due']}. {free}, потом {chore.fine_per_day} {CURRENCY} в день."
         )
     level = _level(len(fined_dates(chore, due, today)))
     return (
@@ -102,3 +104,50 @@ def pay_rejected(payer: str, judge: str, left: int) -> str:
 def banter(who: str, other: str) -> str:
     """Подъёб просто так: {who} — кого подъёбываем, {other} — второй из соседей, если фразе нужен."""
     return pick(phrases.BANTER, who=who, other=other)
+
+
+# --- задачи из /task ---
+
+
+def cap(text: str) -> str:
+    """Первая буква заглавная, остальное как есть (str.capitalize ломает «купить IKEA»)."""
+    return text[:1].upper() + text[1:]
+
+
+def fine_terms(chore: Chore) -> str:
+    if chore.fine_per_day <= 0:
+        return "Штрафа нет, только позор."
+    if chore.grace_days <= 0:
+        return f"Опоздание — {chore.fine_per_day} {CURRENCY} в день с первого же дня."
+    return f"После срока {days(chore.grace_days)} без штрафа, дальше {chore.fine_per_day} {CURRENCY} в день."
+
+
+def fine_terms_short(chore: Chore) -> str:
+    if chore.fine_per_day <= 0:
+        return "без штрафа"
+    grace = f" после {days(chore.grace_days)} льготы" if chore.grace_days else ""
+    return f"штраф {chore.fine_per_day} {CURRENCY}/день{grace}"
+
+
+def task_created(chore: Chore, who: str, author: str, due: date, today: date, promise: bool) -> str:
+    """{who} — исполнитель (ссылка с уведомлением), author — кто поставил."""
+    head = f"📌 {who} пообещал: {chore.task}." if promise else f"📌 Новая задача. {who}, тебе {chore.task}."
+    lines = [head, f"Срок: {due_label(chore, due, today)}.", fine_terms(chore)]
+    if not promise:
+        lines.append(f"Поставил {author}.")
+    lines.append("Сделал — жми кнопку. Отменить может только сосед.")
+    return "\n".join(lines)
+
+
+def task_cancelled(chore: Chore, assignee: str, judge: str, fined: int) -> str:
+    text = f"🗑 {judge} отменил задачу «{chore.task}». {assignee} выдыхает."
+    if fined:
+        text += f" Накапавшие {fined} {CURRENCY} остаются."
+    return text
+
+
+def early_done_check(chore: Chore, who: str, due: date, next_who: str, next_due: date) -> str:
+    return (
+        f"{who}, срок только {due:%d.%m}. Точно уже {chore.done}?\n"
+        f"Если да, следующим будет {next_who}, до {next_due:%d.%m}."
+    )

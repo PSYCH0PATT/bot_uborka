@@ -42,8 +42,9 @@ class FakeBot:
 
 
 class FakeMessage:
-    def __init__(self, chat_id=GROUP):
+    def __init__(self, chat_id=GROUP, text=""):
         self.chat_id = chat_id
+        self.text = text
         self.reply_markup = None
         self.replies = []
 
@@ -74,8 +75,8 @@ def press(handler, query, ctx):
     asyncio.run(handler(SimpleNamespace(callback_query=query), ctx))
 
 
-def command(handler, person, ctx, chat_id=GROUP):
-    msg = FakeMessage(chat_id)
+def command(handler, person, ctx, chat_id=GROUP, text=""):
+    msg = FakeMessage(chat_id, text)
     update = SimpleNamespace(
         effective_message=msg,
         effective_user=SimpleNamespace(id=IDS.get(person, STRANGER)),
@@ -344,3 +345,87 @@ def test_short_replies_come_from_phrases(ctx, monkeypatch):
     set_day(monkeypatch, 3)  # до 5.11 никто ничего не должен
     replies = command(bot.cmd_remind, "dima", ctx)
     assert replies[0].text in phrases.NOTHING_DUE
+
+
+# --- заранее и свои задачи ---
+
+
+def buttons(markup):
+    return {b.text: b.callback_data for row in markup.inline_keyboard for b in row}
+
+
+def test_rugs_can_be_marked_weeks_early_after_a_second_tap(ctx, monkeypatch):
+    set_day(monkeypatch, 8)
+    status = command(bot.cmd_status, "artem", ctx)[0]
+    rugs = buttons(status.markup)["✅ Артём постирал коврики"]  # до срока 29.11 ещё три недели, а кнопка есть
+
+    q = FakeQuery(rugs, "artem", status.markup)
+    press(bot.on_done, q, ctx)
+    check = ctx.bot.sent[-1]
+    assert "срок только 29.11" in check.text and "Дима</b>, до 29.12" in check.text
+    assert bot.store.next_task("rugs").assignee == "artem"  # пока ничего не отмечено
+
+    q = FakeQuery(check.markup.inline_keyboard[0][0].callback_data, "artem", check.markup)
+    press(bot.on_done, q, ctx)
+    assert "Артём</b> постирал коврики." in ctx.bot.sent[-1].text
+    nxt = bot.store.next_task("rugs")
+    assert (nxt.assignee, nxt.due) == ("dima", date(2026, 12, 29))
+
+
+def test_trash_due_tomorrow_is_marked_without_questions(ctx, monkeypatch):
+    set_day(monkeypatch, 4)
+    bot.refresh()
+    task = bot.store.next_task("trash")
+    press(bot.on_done, FakeQuery(f"done:{task.id}", "nikita"), ctx)
+    assert "Никита</b> вынес мусор." in ctx.bot.sent[-1].text
+
+
+def test_task_command_creates_task_with_own_deadline_and_fine(ctx, monkeypatch):
+    replies = command(bot.cmd_task, "nikita", ctx, text="/task Дима купить <стулья> до 10.11 штраф 200 льгота 1")
+    assert replies == []
+    created = ctx.bot.sent[-1]
+    assert created.chat_id == GROUP
+    assert f"tg://user?id={IDS['dima']}" in created.text and "купить &lt;стулья&gt;" in created.text
+    assert "После срока 1 день без штрафа, дальше 200 Kč в день." in created.text
+    assert set(buttons(created.markup)) == {"✅ Сделал «купить <стулья>»", "🗑 Отменить «купить <стулья>»"}
+
+    set_day(monkeypatch, 13)  # срок 10-го, 11-е бесплатно, 12 и 13 — по 200
+    asyncio.run(bot.send_reminders(ctx.bot, evening=False))
+    reminder = next(m for m in ctx.bot.sent if "штраф уже 400 Kč, завтра будет 600 Kč" in m.text)
+    assert f"tg://user?id={IDS['dima']}" in reminder.text
+
+    status = command(bot.cmd_status, "artem", ctx)[0]
+    assert "📌 Купить &lt;стулья&gt;: <b>Дима</b>, просрочено на 3 дня, штраф 400 Kč" in status.text
+    assert "штраф 200 Kč/день после 1 день льготы" in status.text
+
+    done = buttons(reminder.markup)["✅ Сделал «купить <стулья>»"]
+    press(bot.on_done, FakeQuery(done, "dima", reminder.markup), ctx)
+    announce = ctx.bot.sent[-1].text
+    assert "наконец-то сделал «купить &lt;стулья&gt;», опоздание обошлось в 400 Kč" in announce
+    assert "Дальше" not in announce
+    assert bot.store.balance("dima") == 400
+
+
+def test_promise_to_yourself_and_cancel_by_neighbour(ctx):
+    command(bot.cmd_task, "artem", ctx, text="/task я повесить полку до завтра штраф 0")
+    created = ctx.bot.sent[-1]
+    assert "Артём</a> пообещал: повесить полку." in created.text and "Штрафа нет, только позор." in created.text
+    cancel = buttons(created.markup)["🗑 Отменить «повесить полку»"]
+
+    q = FakeQuery(cancel, "artem", created.markup)
+    press(bot.on_cancel, q, ctx)
+    assert "сам не отменишь" in q.answers[0]
+
+    q = FakeQuery(cancel, "dima", created.markup)
+    press(bot.on_cancel, q, ctx)
+    assert q.message.reply_markup is None  # обе кнопки задачи убраны
+    assert "<b>Дима</b> отменил задачу «повесить полку»" in ctx.bot.sent[-1].text
+    assert all(not t.custom for t in bot.store.open_tasks())
+
+
+def test_task_command_explains_mistakes(ctx):
+    assert "Кому задача?" in command(bot.cmd_task, "dima", ctx, text="/task Вася купить пиво до 10.11")[0].text
+    assert "Как поставить задачу" in command(bot.cmd_task, "dima", ctx, text="/task")[0].text
+    assert "Не вижу срок" in command(bot.cmd_task, "dima", ctx, text="/task@uborka_bot я купить пиво")[0].text
+    assert "/start" in command(bot.cmd_task, "stranger", ctx, text="/task я купить пиво до 10.11")[0].text
+    assert ctx.bot.sent == []

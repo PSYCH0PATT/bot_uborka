@@ -23,6 +23,12 @@ def first_open(store, chore):
     return next(t for t in store.open_tasks() if t.chore == chore)
 
 
+def finish(store, task, day):
+    """Отмечает задачу и возвращает следующую по этой обязанности."""
+    assert store.complete(task.id, day)
+    return store.next_task(task.chore)
+
+
 def test_first_tasks_match_the_schedule(store):
     assert [(t.chore, t.assignee, t.due) for t in store.open_tasks()] == [
         ("trash", "nikita", d(5)),
@@ -37,11 +43,11 @@ def test_ensure_tasks_is_idempotent(store):
 
 
 def test_trash_rotates_and_counts_from_done_day(store):
-    nxt = store.complete(first_open(store, "trash").id, d(6))
+    nxt = finish(store, first_open(store, "trash"), d(6))
     assert (nxt.assignee, nxt.due) == ("artem", d(10))
-    nxt = store.complete(nxt.id, d(9))
+    nxt = finish(store, nxt, d(9))
     assert (nxt.assignee, nxt.due) == ("dima", d(13))
-    nxt = store.complete(nxt.id, d(13))
+    nxt = finish(store, nxt, d(13))
     assert (nxt.assignee, nxt.due) == ("nikita", d(17))
 
 
@@ -65,7 +71,7 @@ def test_complete_charges_fines_even_if_sync_never_ran(store):
 def test_completing_twice_does_nothing(store):
     task = first_open(store, "trash")
     store.complete(task.id, d(5))
-    assert store.complete(task.id, d(6)) is None
+    assert store.complete(task.id, d(6)) is False
     assert len(store.tasks("trash")) == 2
 
 
@@ -75,13 +81,13 @@ def test_next_rugs_task_appears_when_due_day_comes(store):
 
 
 def test_early_rugs_completion_shows_next_person(store):
-    nxt = store.complete(first_open(store, "rugs").id, d(28))
+    nxt = finish(store, first_open(store, "rugs"), d(28))
     assert (nxt.assignee, nxt.due) == ("dima", d(29, 12))
 
 
 def test_late_rugs_returns_already_open_next_task(store):
     store.ensure_tasks(d(29, 12))
-    nxt = store.complete(first_open(store, "rugs").id, d(30, 12))
+    nxt = finish(store, first_open(store, "rugs"), d(30, 12))
     assert (nxt.assignee, nxt.due) == ("dima", d(29, 12))
     assert store.balance("artem") == 2900
 
@@ -182,3 +188,63 @@ def test_telegram_ids_bigger_than_32_bits_fit(store):
     big = 7_123_456_789
     assert store.register("artem", big) == "ok"
     assert store.person_by_tg(big) == "artem"
+
+
+# --- задачи из /task ---
+
+
+def test_custom_task_has_its_own_grace_and_fine(store):
+    task = store.create_task("купить стулья", "dima", d(10), grace=2, fine=250, created_by="nikita")
+    assert task.custom and task.title == "купить стулья" and task.created_by == "nikita"
+    assert task in store.open_tasks()
+    store.sync_fines(d(12))  # срок 10-го, ещё два дня льготы
+    assert store.task_fine(task.id) == 0
+    store.sync_fines(d(14))
+    assert store.task_fine(task.id) == 500
+    assert store.complete(task.id, d(14))
+    assert store.next_task("custom") is None
+    assert len(store.open_tasks()) == 2  # мусор и коврики, а новая задача сама не появляется
+
+
+def test_custom_task_without_fine_never_charges(store):
+    task = store.create_task("насрать в коридоре", "artem", d(4), grace=0, fine=0, created_by="artem")
+    store.sync_fines(d(30))
+    assert store.task_fine(task.id) == 0
+    assert store.balance("artem") == 0
+
+
+def test_cancel_needs_a_neighbour_and_keeps_accrued_fine(store):
+    task = store.create_task("повесить полку", "dima", d(5), grace=0, fine=100, created_by="dima")
+    assert store.cancel_task(task.id, "dima", d(7)) == "self"
+    assert store.cancel_task(task.id, "nikita", d(7)) == "ok"
+    assert store.cancel_task(task.id, "artem", d(7)) == "done"
+    assert task.id not in [t.id for t in store.open_tasks()]
+    store.sync_fines(d(20))
+    assert store.task_fine(task.id) == 200  # 6-е и 7-е остались, дальше не капает
+    assert store.complete(task.id, d(20)) is False
+
+
+def test_chores_cannot_be_cancelled(store):
+    assert store.cancel_task(first_open(store, "trash").id, "dima", d(5)) == "done"
+
+
+def test_old_database_gets_new_task_columns(tmp_path):
+    import sqlite3
+
+    from db import Store
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE tasks (id INTEGER PRIMARY KEY, chore TEXT NOT NULL, assignee TEXT NOT NULL, "
+        "due TEXT NOT NULL, done_on TEXT);"
+        "INSERT INTO tasks (chore, assignee, due) VALUES ('trash', 'nikita', '2026-11-05');"
+    )
+    old.commit()
+    old.close()
+    store = Store(str(path))
+    assert [t.chore for t in store.open_tasks()] == ["trash"]
+    task = store.create_task("купить стулья", "dima", d(10), grace=0, fine=100, created_by="nikita")
+    assert store.task(task.id).title == "купить стулья"
+    store.close()
+    Store(str(path)).close()  # второй запуск ничего не ломает

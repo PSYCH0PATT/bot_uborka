@@ -1,6 +1,8 @@
 """Правила квартиры: кто, что и когда. Чистые функции, без Telegram и базы."""
 
 import calendar
+import html
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -10,6 +12,8 @@ DAY_STARTS_AT = 6  # час: до 6 утра ещё идёт вчерашний 
 
 PEOPLE = ("dima", "artem", "nikita")
 NAMES = {"dima": "Дима", "artem": "Артём", "nikita": "Никита"}
+# Как имя могут написать в команде
+NAME_ALIASES = {"дима": "dima", "дмитрий": "dima", "артём": "artem", "артем": "artem", "никита": "nikita"}
 
 GROCERIES = (
     "Мусорные пакеты",
@@ -37,6 +41,7 @@ class Chore:
     grace_days: int
     every_days: int | None = None  # следующий срок = день выполнения + every_days
     monthly_day: int | None = None  # следующий срок = это число следующего месяца
+    fine_per_day: int = FINE_PER_DAY
 
 
 TRASH = Chore(
@@ -65,6 +70,32 @@ RUGS = Chore(
 
 CHORES = {c.key: c for c in (TRASH, RUGS)}
 
+CUSTOM = "custom"  # разовая задача, которую поставили через /task
+TASK_DEFAULT_GRACE = 0
+TASK_TITLE_MAX = 100
+TASK_GRACE_MAX = 60
+TASK_FINE_MAX = 10_000
+
+
+def custom_chore(title: str, due: date, grace_days: int, fine_per_day: int) -> Chore:
+    """Разовая задача в виде Chore, чтобы напоминания и штрафы работали как с мусором.
+
+    Название пишут в инфинитиве («купить стулья»): оно встаёт в {task}. Повелительное наклонение
+    из чужого текста не построить, поэтому {do} — «сделай «купить стулья»». Текст экранирован для HTML.
+    """
+    name = html.escape(title)
+    return Chore(
+        key=CUSTOM,
+        emoji="📌",
+        task=name,
+        done=f"сделал «{name}»",
+        do=f"сделай «{name}»",
+        order=(),
+        first_due=due,
+        grace_days=grace_days,
+        fine_per_day=fine_per_day,
+    )
+
 
 def flat_date(moment: datetime) -> date:
     """Какое сегодня число по правилам квартиры: ночь до DAY_STARTS_AT ещё считается вчерашним днём."""
@@ -82,7 +113,7 @@ def fined_dates(chore: Chore, due: date, until: date) -> list[date]:
 
 
 def fine(chore: Chore, due: date, on: date) -> int:
-    return len(fined_dates(chore, due, on)) * FINE_PER_DAY
+    return len(fined_dates(chore, due, on)) * chore.fine_per_day
 
 
 def month_after(d: date, day: int) -> date:
@@ -125,6 +156,8 @@ def due_label(chore: Chore, due: date, today: date) -> str:
     if ahead == 0:
         return "сегодня"
     late = -ahead
+    if chore.fine_per_day <= 0:
+        return f"просрочено на {days(late)}, штрафа нет — только позор"
     free_left = chore.grace_days - late
     if free_left == 0:
         return f"просрочено на {days(late)}, сегодня последний день без штрафа"
@@ -133,3 +166,101 @@ def due_label(chore: Chore, due: date, today: date) -> str:
     if free_left > 1:
         return f"просрочено на {days(late)}, без штрафа ещё {days(free_left)}"
     return f"просрочено на {days(late)}, штраф {fine(chore, due, today)} {CURRENCY}"
+
+
+# --- задачи, которые ставят сами ---
+
+
+@dataclass(frozen=True)
+class TaskRequest:
+    assignee: str
+    title: str
+    due: date
+    grace_days: int
+    fine_per_day: int
+
+
+TASK_USAGE = (
+    "Как поставить задачу:\n"
+    "/task Дима купить стулья до 30.11 штраф 200 льгота 2\n\n"
+    "Сначала кому: Дима, Артём, Никита или «я». Потом что сделать. Потом срок: «до 30.11», "
+    "«до завтра» или «через 3 дня».\n"
+    f"«штраф 200» — сколько {CURRENCY} в день за просрочку, если не указать — {FINE_PER_DAY}. "
+    "«штраф 0» — без денег, только позор.\n"
+    "«льгота 2» — сколько дней после срока ещё без штрафа, если не указать — 0."
+)
+
+_DATE = re.compile(r"\bдо\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{4}|\d{2}))?(?!\d)", re.I)
+_WORD_DATE = re.compile(r"\bдо\s+(сегодня|завтра|послезавтра)\b", re.I)
+_IN_DAYS = re.compile(r"\bчерез\s+(\d{1,3})\s*(?:дн\w*|день)\b", re.I)
+_GRACE = re.compile(r"\b(?:льгот\w*|без\s+штрафа|отсрочк\w*)\s+(\d{1,3})(?:\s*(?:дн\w*|день))?", re.I)
+_FINE = re.compile(
+    r"\bштраф\w*\s+(\d{1,6})(?:\s*(?:kč|кч|czk|крон\w*))?(?:\s*(?:в|/)\s*день)?", re.I
+)
+_WORD_DAYS = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
+
+
+def _deadline(text: str, today: date) -> tuple[date | None, str, str | None]:
+    """Срок из текста: (дата, текст без срока, ошибка)."""
+    if m := _DATE.search(text):
+        day, month, year = int(m[1]), int(m[2]), m[3]
+        try:
+            if year:
+                due = date(int(year) + (2000 if len(year) == 2 else 0), month, day)
+            else:
+                due = date(today.year, month, day)
+                if due < today and (today - due).days > 60:  # «до 05.01» в ноябре — это следующий год
+                    due = date(today.year + 1, month, day)
+        except ValueError:
+            return None, text, f"Нет такой даты: {m[0][3:].strip()}."
+        return due, text[: m.start()] + text[m.end() :], None
+    if m := _WORD_DATE.search(text):
+        return today + timedelta(days=_WORD_DAYS[m[1].lower()]), text[: m.start()] + text[m.end() :], None
+    if m := _IN_DAYS.search(text):
+        return today + timedelta(days=int(m[1])), text[: m.start()] + text[m.end() :], None
+    return None, text, None
+
+
+def parse_task(text: str, today: date, author: str) -> TaskRequest | str:
+    """Разбирает «Дима купить стулья до 30.11 штраф 200 льгота 2». Вернёт задачу или текст ошибки."""
+    words = text.split(maxsplit=1)
+    if not words:
+        return TASK_USAGE
+    first = words[0].lower().strip(",:;.—-")
+    if first == "я":
+        assignee = author
+    elif first in NAME_ALIASES:
+        assignee = NAME_ALIASES[first]
+    else:
+        return f"Кому задача? Начни с имени: Дима, Артём, Никита или «я».\n\n{TASK_USAGE}"
+    rest = words[1] if len(words) > 1 else ""
+
+    due, rest, error = _deadline(rest, today)
+    if error:
+        return error
+    if due is None:
+        return f"Не вижу срок. Напиши «до 30.11», «до завтра» или «через 3 дня».\n\n{TASK_USAGE}"
+    if due < today:
+        return f"{due:%d.%m} уже прошло. Задачи в прошлое не ставлю."
+    if (due - today).days > 366:
+        return "Срок больше чем через год. Столько не живут."
+
+    grace = TASK_DEFAULT_GRACE
+    if m := _GRACE.search(rest):  # раньше штрафа: «без штрафа 2 дня» иначе прочиталось бы как «штраф 2»
+        grace = int(m[1])
+        rest = rest[: m.start()] + rest[m.end() :]
+    fine_per_day = FINE_PER_DAY
+    if m := _FINE.search(rest):
+        fine_per_day = int(m[1])
+        rest = rest[: m.start()] + rest[m.end() :]
+    if grace > TASK_GRACE_MAX:
+        return f"Льгота максимум {days(TASK_GRACE_MAX)}."
+    if fine_per_day > TASK_FINE_MAX:
+        return f"Штраф максимум {TASK_FINE_MAX} {CURRENCY} в день. Совесть имейте."
+
+    title = re.sub(r"\s+", " ", rest).strip(" ,.;:-—")
+    if not title:
+        return f"А делать-то что?\n\n{TASK_USAGE}"
+    if len(title) > TASK_TITLE_MAX:
+        return f"Слишком длинно, уложись в {TASK_TITLE_MAX} знаков."
+    return TaskRequest(assignee, title, due, grace, fine_per_day)

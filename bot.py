@@ -1,9 +1,10 @@
 """Телеграм-бот по уборке: очереди, напоминания, штрафы и продукты."""
 
+import html
 import logging
 import os
 import random
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,9 +13,10 @@ from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, ChatMigrated, Forbidden, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, Defaults, TypeHandler
 
+import rules
 import texts
-from db import Store, Task
-from rules import CHORES, CURRENCY, GROCERIES, NAMES, PEOPLE, due_label, flat_date
+from db import Store, Task, chore_of
+from rules import CURRENCY, GROCERIES, NAMES, PEOPLE, due_label, flat_date
 
 
 def load_env(path: Path) -> None:
@@ -32,7 +34,7 @@ load_env(Path(__file__).with_name(".env"))
 TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Prague"))
 MORNING = time.fromisoformat(os.environ.get("MORNING", "10:00")).replace(tzinfo=TZ)
 EVENING = time.fromisoformat(os.environ.get("EVENING", "21:00")).replace(tzinfo=TZ)
-DONE_BUTTON_DAYS_AHEAD = 7  # в /status кнопка «сделал» есть у задач на ближайшую неделю
+EARLY_CONFIRM_DAYS = 1  # мусор и коврики раньше чем за день до срока бот переспросит: вдруг ткнул случайно
 GROUPS = (ChatType.GROUP, ChatType.SUPERGROUP)
 BANTER_CHANCE = 0.2  # шанс подъебать кого-нибудь просто так при утреннем или вечернем кроне…
 BANTER_MIN_GAP_DAYS = 2  # …но не чаще раза в два дня: в среднем выходит пара раз в неделю
@@ -42,7 +44,9 @@ HELP = (
     "/shop — кто следующий покупает продукты\n"
     "/fines — долги по штрафам\n"
     "/paid — «я заплатил штраф», сосед подтверждает\n"
-    "/remind — прислать напоминания прямо сейчас"
+    "/remind — прислать напоминания прямо сейчас\n"
+    "/task — поставить задачу со сроком и штрафом, например:\n"
+    "/task Дима купить стулья до 30.11 штраф 200 льгота 2"
 )
 
 log = logging.getLogger("uborka")
@@ -238,13 +242,27 @@ async def on_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # --- обязанности ---
 
 
-def done_keyboard(tasks: list[Task], with_names: bool) -> InlineKeyboardMarkup | None:
+def done_keyboard(tasks: list[Task], with_names: bool, cancel: bool = False) -> InlineKeyboardMarkup | None:
+    """Кнопки «сделал». cancel=True — ещё и «отменить» у задач из /task."""
     rows = []
     for t in tasks:
-        chore = CHORES[t.chore]
-        label = f"✅ {NAMES[t.assignee]} {chore.done}" if with_names else f"✅ {chore.done.capitalize()}"
+        done = html.unescape(chore_of(t).done)  # подпись кнопки — обычный текст, не HTML
+        label = f"✅ {NAMES[t.assignee]} {done}" if with_names else f"✅ {texts.cap(done)}"
         rows.append([InlineKeyboardButton(label, callback_data=f"done:{t.id}")])
+        if cancel and t.custom:
+            rows.append([InlineKeyboardButton(f"🗑 Отменить «{t.title}»", callback_data=f"cancel:{t.id}")])
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def announce(api: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+    """Пишет в чат, где нажали, и дублирует в общий, если это другой чат."""
+    await api.send_message(chat_id, text, reply_markup=markup)
+    group = store.get_chat_id()
+    if group and group != chat_id:
+        try:
+            await send_to_group(api, text, markup)
+        except TelegramError as e:  # сюда уже написали, а общий чат починится сам, как только в нём кто-то нажмёт
+            log.warning("Не смог продублировать в общий чат %s: %s", group, e)
 
 
 def without_button(markup: InlineKeyboardMarkup | None, data: str) -> InlineKeyboardMarkup | None:
@@ -257,8 +275,11 @@ def without_button(markup: InlineKeyboardMarkup | None, data: str) -> InlineKeyb
 def status_text(t: date) -> str:
     lines = [f"📋 <b>Расклад на {t:%d.%m}</b>", ""]
     for task in store.open_tasks():
-        chore = CHORES[task.chore]
-        lines.append(f"{chore.emoji} {chore.task.capitalize()}: {name(task.assignee)}, {due_label(chore, task.due, t)}")
+        chore = chore_of(task)
+        line = f"{chore.emoji} {texts.cap(chore.task)}: {name(task.assignee)}, {due_label(chore, task.due, t)}"
+        if task.custom:
+            line += f" ({texts.fine_terms_short(chore)})"
+        lines.append(line)
     debts = ", ".join(f"{NAMES[p]} {b} {CURRENCY}" for p, b in store.balances().items())
     lines += ["", f"💸 Долги: {debts}"]
     missing = [NAMES[p] for p in PEOPLE if store.tg_of(p) is None]
@@ -269,8 +290,8 @@ def status_text(t: date) -> str:
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     t = refresh()
-    soon = [task for task in store.open_tasks() if task.due <= t + timedelta(days=DONE_BUTTON_DAYS_AHEAD)]
-    await update.effective_message.reply_text(status_text(t), reply_markup=done_keyboard(soon, with_names=True))
+    keyboard = done_keyboard(store.open_tasks(), with_names=True, cancel=True)
+    await update.effective_message.reply_text(status_text(t), reply_markup=keyboard)
 
 
 async def on_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,9 +299,10 @@ async def on_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     person = await whoami(q)
     if person is None:
         return
-    task = store.task(int(q.data.split(":")[1]))
-    if task is None or task.done_on:
-        await q.answer("Это уже отмечено.")
+    _, task_id, *flags = q.data.split(":")  # done:<id> или done:<id>:ok — «да, правда сделал заранее»
+    task = store.task(int(task_id))
+    if task is None or task.done_on or task.cancelled_on:
+        await q.answer("Это уже закрыто.")
         await q.edit_message_reply_markup(without_button(q.message.reply_markup, q.data))
         return
     if task.assignee != person:
@@ -288,22 +310,28 @@ async def on_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     t = today()
-    nxt = store.complete(task.id, t)
-    chore = CHORES[task.chore]
+    chore = chore_of(task)
+    if not task.custom and (task.due - t).days > EARLY_CONFIRM_DAYS and "ok" not in flags:
+        # Заранее отметить можно, но мусор и коврики от этого сдвигают очередь — переспросим
+        await q.answer()
+        next_due = rules.next_due(chore, task.due, t)
+        check = texts.early_done_check(chore, name(person), task.due, name(rules.next_in_order(chore.order, person)), next_due)
+        yes = InlineKeyboardButton(f"✅ Да, {chore.done}", callback_data=f"done:{task.id}:ok")
+        await ctx.bot.send_message(q.message.chat_id, check, reply_markup=InlineKeyboardMarkup([[yes]]))
+        return
+    if not store.complete(task.id, t):
+        await q.answer("Это уже закрыто.")
+        return
     await q.answer("Записал 👍")
-    await q.edit_message_reply_markup(without_button(q.message.reply_markup, q.data))
-
-    text = (
-        f"{texts.done(chore, name(person), store.task_fine(task.id), other=someone_else(person))}\n\n"
-        f"Дальше: {who(nxt.assignee)}, {chore.task} {due_label(chore, nxt.due, t)}."
+    await q.edit_message_reply_markup(
+        without_button(without_button(q.message.reply_markup, q.data), f"cancel:{task.id}")
     )
-    group = store.get_chat_id()
-    await ctx.bot.send_message(q.message.chat_id, text)
-    if group and group != q.message.chat_id:
-        try:
-            await send_to_group(ctx.bot, text)
-        except TelegramError as e:  # сюда уже написали, а общий чат починится сам, как только в нём кто-то нажмёт
-            log.warning("Не смог продублировать в общий чат %s: %s", group, e)
+
+    text = texts.done(chore, name(person), store.task_fine(task.id), other=someone_else(person))
+    nxt = None if task.custom else store.next_task(task.chore)
+    if nxt:
+        text += f"\n\nДальше: {who(nxt.assignee)}, {chore.task} {due_label(chore, nxt.due, t)}."
+    await announce(ctx.bot, q.message.chat_id, text)
 
 
 async def send_reminders(api: Bot, evening: bool) -> int:
@@ -314,7 +342,7 @@ async def send_reminders(api: Bot, evening: bool) -> int:
     t = refresh()
     due = [task for task in store.open_tasks() if task.due <= t]
     for task in due:
-        text = texts.reminder(CHORES[task.chore], who(task.assignee), task.due, t, evening, other=someone_else(task.assignee))
+        text = texts.reminder(chore_of(task), who(task.assignee), task.due, t, evening, other=someone_else(task.assignee))
         try:
             await send_to_group(api, text, done_keyboard([task], with_names=False))
         except TelegramError as e:
@@ -361,6 +389,49 @@ async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(texts.nothing_due())
     elif update.effective_chat.id != store.get_chat_id():
         await update.effective_message.reply_text("Напоминания ушли в общий чат.")
+
+
+# --- задачи, которые ставим сами ---
+
+
+async def cmd_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/task Дима купить стулья до 30.11 штраф 200 льгота 2"""
+    msg = update.effective_message
+    person = store.person_by_tg(update.effective_user.id)
+    if person is None:
+        await msg.reply_text("Я тебя не знаю. Напиши /start и нажми на своё имя.")
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    t = today()
+    req = rules.parse_task(parts[1] if len(parts) > 1 else "", t, person)
+    if isinstance(req, str):
+        await msg.reply_text(html.escape(req))
+        return
+    task = store.create_task(req.title, req.assignee, req.due, req.grace_days, req.fine_per_day, person)
+    chore = chore_of(task)
+    text = texts.task_created(chore, who(task.assignee), name(person), task.due, t, promise=task.assignee == person)
+    await announce(ctx.bot, msg.chat_id, text, done_keyboard([task], with_names=False, cancel=True))
+
+
+async def on_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    person = await whoami(q)
+    if person is None:
+        return
+    task = store.task(int(q.data.split(":")[1]))
+    status = store.cancel_task(task.id, person, today()) if task else "done"
+    if status == "self":
+        await q.answer("Свою задачу сам не отменишь, хитрожопый. Пусть сосед нажмёт.", show_alert=True)
+        return
+    markup = without_button(without_button(q.message.reply_markup, q.data), f"done:{task.id}" if task else "")
+    if status == "done":
+        await q.answer("Уже закрыто.")
+        await q.edit_message_reply_markup(markup)
+        return
+    await q.answer("Отменил.")
+    await q.edit_message_reply_markup(markup)
+    text = texts.task_cancelled(chore_of(task), name(task.assignee), name(person), store.task_fine(task.id))
+    await announce(ctx.bot, q.message.chat_id, text)
 
 
 # --- штрафы ---
@@ -486,6 +557,7 @@ async def set_commands(app: Application) -> None:
             BotCommand("fines", "Долги по штрафам"),
             BotCommand("paid", "Я заплатил штраф"),
             BotCommand("remind", "Напомнить прямо сейчас"),
+            BotCommand("task", "Поставить задачу со сроком и штрафом"),
             BotCommand("start", "Привязать чат и представиться"),
         ]
     )
@@ -507,9 +579,11 @@ def build_app(token: str, polling: bool = True) -> Application:
     app.add_handler(CommandHandler("fines", cmd_fines))
     app.add_handler(CommandHandler("paid", cmd_paid))
     app.add_handler(CommandHandler("remind", cmd_remind))
+    app.add_handler(CommandHandler("task", cmd_task))
     app.add_handler(CallbackQueryHandler(on_register, pattern=r"^reg:"))
     app.add_handler(CallbackQueryHandler(on_move, pattern=r"^move$"))
     app.add_handler(CallbackQueryHandler(on_done, pattern=r"^done:"))
+    app.add_handler(CallbackQueryHandler(on_cancel, pattern=r"^cancel:"))
     app.add_handler(CallbackQueryHandler(on_pay, pattern=r"^pay:"))
     app.add_handler(CallbackQueryHandler(on_buy, pattern=r"^buy:"))
     app.add_handler(CallbackQueryHandler(on_unbuy, pattern=r"^unbuy$"))
